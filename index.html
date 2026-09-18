@@ -11,6 +11,396 @@
 </head>
 <body>
 <div id="root"></div>
+<div id="auth-overlay" style="position:fixed;inset:0;z-index:999999;background:#F4F5F7;display:none;align-items:center;justify-content:center;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;"></div>
+<script>
+(function(){
+"use strict";
+var SUPABASE_URL="https://sgsrejohlztgysobvrhr.supabase.co";
+var ANON_KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNnc3Jlam9obHp0Z3lzb2J2cmhyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODk3MDI2NjUsImV4cCI6MjEwNTI3ODY2NX0.GBig-bmQXsBG8T5bjeVBpvb0bUwL-jNZb0ytZkCUKOk";
+var AUTH_URL=SUPABASE_URL+"/auth/v1";
+var REST_URL=SUPABASE_URL+"/rest/v1";
+var LS_KEY="app_auth_session_v1";
+
+var MODULES=[
+  {key:"profiles",label:"Profiles"},
+  {key:"bizdb",label:"Business Directory"},
+  {key:"taxdb",label:"Tax Directory"},
+  {key:"langcoursehub",label:"Language Course"},
+  {key:"academicedhub",label:"Academic Education"},
+  {key:"customdb",label:"Custom Directories"},
+  {key:"templates",label:"Templates"}
+];
+
+function defaultPerms(){
+  var p={};
+  MODULES.forEach(function(m){ p[m.key]={view:false,add:false,del:false}; });
+  return p;
+}
+
+function saveSession(s){ try{ localStorage.setItem(LS_KEY, JSON.stringify(s)); }catch(e){} }
+function loadSession(){ try{ return JSON.parse(localStorage.getItem(LS_KEY)); }catch(e){ return null; } }
+function clearSession(){ try{ localStorage.removeItem(LS_KEY); }catch(e){} }
+
+function apiJson(url, opts){
+  opts = opts || {};
+  opts.headers = Object.assign({apikey: ANON_KEY}, opts.headers||{});
+  return fetch(url, opts).then(function(res){
+    return res.json().catch(function(){ return null; }).then(function(data){
+      if(!res.ok){
+        var msg = (data && (data.error_description || data.msg || data.message)) || ("Request failed: "+res.status);
+        throw new Error(msg);
+      }
+      return data;
+    });
+  });
+}
+
+function signIn(email,password){
+  return apiJson(AUTH_URL+"/token?grant_type=password", {
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({email:email,password:password})
+  });
+}
+
+function refreshSession(refresh_token){
+  return apiJson(AUTH_URL+"/token?grant_type=refresh_token", {
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({refresh_token:refresh_token})
+  });
+}
+
+function signUp(email,password){
+  return apiJson(AUTH_URL+"/signup", {
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({email:email,password:password})
+  });
+}
+
+function fetchAppUser(token,uid){
+  return apiJson(REST_URL+"/app_users?id=eq."+encodeURIComponent(uid)+"&select=*", {
+    headers:{Authorization:"Bearer "+token}
+  }).then(function(rows){ return (rows && rows[0]) || null; });
+}
+
+function listAppUsers(token){
+  return apiJson(REST_URL+"/app_users?select=*&order=created_at.asc", {
+    headers:{Authorization:"Bearer "+token}
+  });
+}
+
+function insertAppUser(token,row){
+  return apiJson(REST_URL+"/app_users", {
+    method:"POST",
+    headers:{Authorization:"Bearer "+token,"Content-Type":"application/json",Prefer:"resolution=merge-duplicates,return=representation"},
+    body: JSON.stringify([row])
+  });
+}
+
+function updateAppUser(token,id,patch){
+  return apiJson(REST_URL+"/app_users?id=eq."+encodeURIComponent(id), {
+    method:"PATCH",
+    headers:{Authorization:"Bearer "+token,"Content-Type":"application/json",Prefer:"return=representation"},
+    body: JSON.stringify(patch)
+  });
+}
+
+function esc(s){
+  return String(s==null?"":s).replace(/[&<>"']/g, function(c){
+    return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];
+  });
+}
+
+var overlay = document.getElementById("auth-overlay");
+var rootEl = document.getElementById("root");
+if(rootEl) rootEl.style.visibility = "hidden";
+
+var state = { token:null, refresh_token:null, authUser:null, appUser:null };
+
+var authResolve;
+var authPromise = new Promise(function(res){ authResolve = res; });
+window.__waitForAuth = function(){ return authPromise; };
+
+function render(html){ overlay.innerHTML = html; }
+
+function card(inner){
+  return '<div style="background:#fff;border-radius:14px;padding:32px;width:360px;max-width:92vw;box-shadow:0 10px 40px rgba(0,0,0,.14)">'+inner+'</div>';
+}
+
+function showLogin(err){
+  render(card(
+    '<h2 style="margin:0 0 4px;font-family:Georgia,\'Times New Roman\',serif;font-size:22px;color:#1C2333;">Office Register</h2>'+
+    '<p style="margin:0 0 20px;color:#777;font-size:13px;">Sign in to continue</p>'+
+    (err ? '<div style="background:#FEE2E2;color:#B91C1C;padding:9px 12px;border-radius:8px;margin-bottom:14px;font-size:13px;">'+esc(err)+'</div>' : '')+
+    '<label style="display:block;font-size:13px;color:#444;margin-bottom:4px;">Email</label>'+
+    '<input id="li-email" type="email" autocomplete="username" style="width:100%;box-sizing:border-box;padding:10px 12px;margin:0 0 14px;border:1px solid #d5d8de;border-radius:8px;font-size:14px;" />'+
+    '<label style="display:block;font-size:13px;color:#444;margin-bottom:4px;">Password</label>'+
+    '<input id="li-pass" type="password" autocomplete="current-password" style="width:100%;box-sizing:border-box;padding:10px 12px;margin:0 0 20px;border:1px solid #d5d8de;border-radius:8px;font-size:14px;" />'+
+    '<button id="li-submit" style="width:100%;padding:12px;background:#1C2333;color:#fff;border:none;border-radius:8px;font-weight:600;font-size:14px;cursor:pointer;">Sign in</button>'
+  ));
+  var pass = document.getElementById("li-pass");
+  document.getElementById("li-submit").onclick = doLogin;
+  pass.addEventListener("keydown", function(e){ if(e.key==="Enter") doLogin(); });
+}
+
+function doLogin(){
+  var email = document.getElementById("li-email").value.trim();
+  var password = document.getElementById("li-pass").value;
+  var btn = document.getElementById("li-submit");
+  if(!email || !password){ showLogin("Email ও Password দিন"); return; }
+  btn.disabled = true; btn.textContent = "Signing in...";
+  signIn(email,password).then(function(sess){
+    return fetchAppUser(sess.access_token, sess.user.id).then(function(appUser){
+      return {sess:sess, appUser:appUser};
+    });
+  }).then(function(res){
+    if(res.appUser && res.appUser.disabled){
+      showLogin("এই অ্যাকাউন্ট বন্ধ (disabled) করা আছে। অ্যাডমিনের সাথে যোগাযোগ করুন।");
+      return;
+    }
+    state.token = res.sess.access_token;
+    state.refresh_token = res.sess.refresh_token;
+    state.authUser = res.sess.user;
+    state.appUser = res.appUser;
+    saveSession({access_token:res.sess.access_token, refresh_token:res.sess.refresh_token, user:res.sess.user});
+    enterApp();
+  }).catch(function(e){
+    showLogin(e.message || "Login failed");
+  });
+}
+
+function enterApp(){
+  window.__appUser = state.appUser;
+  window.__isAdmin = !!(state.appUser && state.appUser.role === "admin");
+  window.__appPerms = state.appUser ? state.appUser.permissions : {};
+  window.__appAuthToken = state.token;
+  window.__appAuthedFetch = function(url, opts){
+    opts = opts || {};
+    opts.headers = Object.assign({apikey: ANON_KEY, Authorization:"Bearer "+state.token}, opts.headers||{});
+    return fetch(url, opts);
+  };
+  overlay.style.display = "none";
+  if(rootEl) rootEl.style.visibility = "visible";
+  authResolve();
+  injectChrome();
+}
+
+function injectChrome(){
+  var old = document.getElementById("app-chrome-bar");
+  if(old) old.remove();
+  var bar = document.createElement("div");
+  bar.id = "app-chrome-bar";
+  bar.style.cssText = "position:fixed;top:10px;right:14px;z-index:99998;display:flex;gap:8px;font-family:system-ui,sans-serif;";
+  var html = '<button id="app-logout-btn" style="padding:6px 14px;background:#fff;border:1px solid #d5d8de;border-radius:20px;font-size:12px;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,.08);">Logout</button>';
+  if(window.__isAdmin){
+    html = '<button id="app-admin-btn" style="padding:6px 14px;background:#1C2333;color:#fff;border:none;border-radius:20px;font-size:12px;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,.15);">Admin Panel</button>' + html;
+  }
+  bar.innerHTML = html;
+  document.body.appendChild(bar);
+  document.getElementById("app-logout-btn").onclick = function(){
+    clearSession();
+    location.reload();
+  };
+  if(window.__isAdmin){
+    document.getElementById("app-admin-btn").onclick = openAdminPanel;
+  }
+}
+
+/* ---------- Admin Panel ---------- */
+
+var adminUsers = [];
+
+function openAdminPanel(){
+  overlay.style.display = "flex";
+  if(rootEl) rootEl.style.visibility = "hidden";
+  renderAdminLoading();
+  listAppUsers(state.token).then(function(rows){
+    adminUsers = rows || [];
+    renderAdminPanel();
+  }).catch(function(e){
+    renderAdminError(e.message);
+  });
+}
+
+function closeAdminPanel(){
+  overlay.style.display = "none";
+  if(rootEl) rootEl.style.visibility = "visible";
+}
+
+function renderAdminLoading(){
+  render('<div style="background:#fff;border-radius:14px;padding:28px;color:#555;">Loading users...</div>');
+}
+function renderAdminError(msg){
+  render('<div style="background:#fff;border-radius:14px;padding:28px;color:#B91C1C;">Error: '+esc(msg)+'</div>');
+}
+
+function permCell(u, m){
+  var p = (u.permissions && u.permissions[m.key]) || {view:false,add:false,del:false};
+  var dis = u.role === "admin" ? "disabled" : "";
+  return '<td style="padding:6px 10px;text-align:center;border-bottom:1px solid #eee;">'+
+    '<label style="margin-right:8px;font-size:11px;"><input type="checkbox" data-uid="'+u.id+'" data-mod="'+m.key+'" data-field="view" '+(p.view?"checked":"")+' '+dis+'> View</label>'+
+    '<label style="margin-right:8px;font-size:11px;"><input type="checkbox" data-uid="'+u.id+'" data-mod="'+m.key+'" data-field="add" '+(p.add?"checked":"")+' '+dis+'> Add</label>'+
+    '<label style="font-size:11px;"><input type="checkbox" data-uid="'+u.id+'" data-mod="'+m.key+'" data-field="del" '+(p.del?"checked":"")+' '+dis+'> Delete</label>'+
+    '</td>';
+}
+
+function renderAdminPanel(){
+  var rowsHtml = adminUsers.map(function(u){
+    var modCells = MODULES.map(function(m){ return permCell(u,m); }).join("");
+    return '<div data-row="'+u.id+'" style="border:1px solid #e5e7eb;border-radius:10px;padding:14px;margin-bottom:12px;">'+
+      '<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:8px;">'+
+        '<div><strong>'+esc(u.email)+'</strong> '+(u.disabled?'<span style="color:#B91C1C;font-size:12px;">(disabled)</span>':'')+'</div>'+
+        '<div style="display:flex;align-items:center;gap:10px;">'+
+          '<select data-role="'+u.id+'" style="padding:4px 8px;border-radius:6px;border:1px solid #ccc;">'+
+            '<option value="staff"'+(u.role==="staff"?" selected":"")+'>Staff</option>'+
+            '<option value="admin"'+(u.role==="admin"?" selected":"")+'>Admin</option>'+
+          '</select>'+
+          '<label style="font-size:12px;"><input type="checkbox" data-disabled="'+u.id+'" '+(u.disabled?"checked":"")+'> Disabled</label>'+
+          '<button data-save="'+u.id+'" style="padding:6px 12px;background:#1C2333;color:#fff;border:none;border-radius:6px;font-size:12px;cursor:pointer;">Save</button>'+
+        '</div>'+
+      '</div>'+
+      '<table style="width:100%;border-collapse:collapse;font-size:12px;">'+
+        '<tr style="text-align:left;color:#777;"><th style="padding:4px 10px;">Module</th><th style="padding:4px 10px;">Permissions</th></tr>'+
+        MODULES.map(function(m){ return '<tr><td style="padding:6px 10px;border-bottom:1px solid #eee;color:#333;">'+esc(m.label)+'</td>'+permCell(u,m)+'</tr>'; }).join("")+
+      '</table>'+
+    '</div>';
+  }).join("");
+
+  render(
+    '<div style="background:#fff;border-radius:14px;padding:26px;width:760px;max-width:94vw;max-height:88vh;overflow:auto;">'+
+      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">'+
+        '<h2 style="margin:0;font-family:Georgia,serif;color:#1C2333;">Admin Panel — Users</h2>'+
+        '<button id="admin-close-btn" style="border:none;background:none;font-size:20px;cursor:pointer;color:#777;">&times;</button>'+
+      '</div>'+
+      '<div id="admin-msg"></div>'+
+      rowsHtml+
+      '<div style="border:1px dashed #c9ccd2;border-radius:10px;padding:16px;margin-top:10px;">'+
+        '<h3 style="margin:0 0 10px;font-size:15px;color:#1C2333;">Create New User</h3>'+
+        '<div style="display:flex;gap:10px;flex-wrap:wrap;">'+
+          '<input id="nu-email" type="email" placeholder="Email" style="flex:1;min-width:180px;padding:9px 10px;border:1px solid #d5d8de;border-radius:8px;" />'+
+          '<input id="nu-pass" type="text" placeholder="Temporary password" style="flex:1;min-width:180px;padding:9px 10px;border:1px solid #d5d8de;border-radius:8px;" />'+
+          '<select id="nu-role" style="padding:9px 10px;border-radius:8px;border:1px solid #d5d8de;">'+
+            '<option value="staff">Staff</option>'+
+            '<option value="admin">Admin</option>'+
+          '</select>'+
+          '<button id="nu-create" style="padding:9px 16px;background:#1C2333;color:#fff;border:none;border-radius:8px;cursor:pointer;">Create</button>'+
+        '</div>'+
+      '</div>'+
+    '</div>'
+  );
+
+  document.getElementById("admin-close-btn").onclick = closeAdminPanel;
+  document.getElementById("nu-create").onclick = onCreateUser;
+
+  adminUsers.forEach(function(u){
+    var saveBtn = overlay.querySelector('[data-save="'+u.id+'"]');
+    if(saveBtn) saveBtn.onclick = function(){ onSaveUser(u.id); };
+  });
+}
+
+function readRowPatch(uid){
+  var role = overlay.querySelector('[data-role="'+uid+'"]').value;
+  var disabled = overlay.querySelector('[data-disabled="'+uid+'"]').checked;
+  var perms = {};
+  MODULES.forEach(function(m){
+    perms[m.key] = {
+      view: overlay.querySelector('[data-uid="'+uid+'"][data-mod="'+m.key+'"][data-field="view"]').checked,
+      add: overlay.querySelector('[data-uid="'+uid+'"][data-mod="'+m.key+'"][data-field="add"]').checked,
+      del: overlay.querySelector('[data-uid="'+uid+'"][data-mod="'+m.key+'"][data-field="del"]').checked
+    };
+  });
+  return {role:role, disabled:disabled, permissions:perms};
+}
+
+function onSaveUser(uid){
+  var patch = readRowPatch(uid);
+  var msg = document.getElementById("admin-msg");
+  updateAppUser(state.token, uid, patch).then(function(){
+    msg.innerHTML = '<div style="background:#DCFCE7;color:#166534;padding:8px 12px;border-radius:8px;margin-bottom:12px;font-size:13px;">Saved.</div>';
+    if(uid === state.authUser.id){
+      state.appUser = Object.assign({}, state.appUser, patch);
+      window.__appUser = state.appUser;
+      window.__isAdmin = state.appUser.role === "admin";
+      window.__appPerms = state.appUser.permissions;
+    }
+  }).catch(function(e){
+    msg.innerHTML = '<div style="background:#FEE2E2;color:#B91C1C;padding:8px 12px;border-radius:8px;margin-bottom:12px;font-size:13px;">'+esc(e.message)+'</div>';
+  });
+}
+
+function onCreateUser(){
+  var email = document.getElementById("nu-email").value.trim();
+  var password = document.getElementById("nu-pass").value;
+  var role = document.getElementById("nu-role").value;
+  var btn = document.getElementById("nu-create");
+  var msg = document.getElementById("admin-msg");
+  if(!email || !password){
+    msg.innerHTML = '<div style="background:#FEE2E2;color:#B91C1C;padding:8px 12px;border-radius:8px;margin-bottom:12px;font-size:13px;">Email ও Password দিন</div>';
+    return;
+  }
+  btn.disabled = true; btn.textContent = "Creating...";
+  signUp(email,password).then(function(res){
+    var uid = res && res.id ? res.id : (res && res.user ? res.user.id : null);
+    if(!uid) throw new Error("Signup succeeded but no user id returned. Email confirmation may be required — check Supabase Auth settings.");
+    return insertAppUser(state.token, {id:uid, email:email, role:role, permissions:defaultPerms(), disabled:false});
+  }).then(function(){
+    return listAppUsers(state.token);
+  }).then(function(rows){
+    adminUsers = rows || [];
+    renderAdminPanel();
+    var msg2 = document.getElementById("admin-msg");
+    if(msg2) msg2.innerHTML = '<div style="background:#DCFCE7;color:#166534;padding:8px 12px;border-radius:8px;margin-bottom:12px;font-size:13px;">User created.</div>';
+  }).catch(function(e){
+    btn.disabled = false; btn.textContent = "Create";
+    msg.innerHTML = '<div style="background:#FEE2E2;color:#B91C1C;padding:8px 12px;border-radius:8px;margin-bottom:12px;font-size:13px;">'+esc(e.message)+'</div>';
+  });
+}
+
+/* ---------- Boot ---------- */
+
+function boot(){
+  var sess = loadSession();
+  if(!sess){ overlay.style.display = "flex"; showLogin(); return; }
+  overlay.style.display = "flex";
+  render(card('<div style="color:#666;font-size:14px;">Loading...</div>'));
+  fetchAppUser(sess.access_token, sess.user.id).then(function(appUser){
+    state.token = sess.access_token;
+    state.refresh_token = sess.refresh_token;
+    state.authUser = sess.user;
+    state.appUser = appUser;
+    if(appUser && appUser.disabled){
+      clearSession();
+      showLogin("এই অ্যাকাউন্ট বন্ধ (disabled) করা আছে। অ্যাডমিনের সাথে যোগাযোগ করুন।");
+      return;
+    }
+    enterApp();
+  }).catch(function(){
+    refreshSession(sess.refresh_token).then(function(refreshed){
+      return fetchAppUser(refreshed.access_token, refreshed.user.id).then(function(appUser){
+        state.token = refreshed.access_token;
+        state.refresh_token = refreshed.refresh_token;
+        state.authUser = refreshed.user;
+        state.appUser = appUser;
+        saveSession({access_token:refreshed.access_token, refresh_token:refreshed.refresh_token, user:refreshed.user});
+        if(appUser && appUser.disabled){
+          clearSession();
+          showLogin("এই অ্যাকাউন্ট বন্ধ (disabled) করা আছে। অ্যাডমিনের সাথে যোগাযোগ করুন।");
+          return;
+        }
+        enterApp();
+      });
+    }).catch(function(){
+      clearSession();
+      showLogin();
+    });
+  });
+}
+
+boot();
+})();
+</script>
 <script>
 (()=>{var WT=Object.create;var V2=Object.defineProperty;var XT=Object.getOwnPropertyDescriptor;var IT=Object.getOwnPropertyNames;var RT=Object.getPrototypeOf,FT=Object.prototype.hasOwnProperty;var nf=(e=>typeof require<"u"?require:typeof Proxy<"u"?new Proxy(e,{get:(t,r)=>(typeof require<"u"?require:t)[r]}):e)(function(e){if(typeof require<"u")return require.apply(this,arguments);throw Error('Dynamic require of "'+e+'" is not supported')});var ca=(e,t)=>()=>(t||e((t={exports:{}}).exports,t),t.exports);var VT=(e,t,r,n)=>{if(t&&typeof t=="object"||typeof t=="function")for(let a of IT(t))!FT.call(e,a)&&a!==r&&V2(e,a,{get:()=>t[a],enumerable:!(n=XT(t,a))||n.enumerable});return e};var Rn=(e,t,r)=>(r=e!=null?WT(RT(e)):{},VT(t||!e||!e.__esModule?V2(r,"default",{value:e,enumerable:!0}):r,e));var _2=ca($e=>{"use strict";var zh=Symbol.for("react.transitional.element"),BT=Symbol.for("react.portal"),MT=Symbol.for("react.fragment"),YT=Symbol.for("react.strict_mode"),qT=Symbol.for("react.profiler"),ZT=Symbol.for("react.consumer"),GT=Symbol.for("react.context"),JT=Symbol.for("react.forward_ref"),UT=Symbol.for("react.suspense"),KT=Symbol.for("react.memo"),Z2=Symbol.for("react.lazy"),QT=Symbol.for("react.activity"),B2=Symbol.iterator;function _T(e){return e===null||typeof e!="object"?null:(e=B2&&e[B2]||e["@@iterator"],typeof e=="function"?e:null)}var G2={isMounted:function(){return!1},enqueueForceUpdate:function(){},enqueueReplaceState:function(){},enqueueSetState:function(){}},J2=Object.assign,U2={};function Ol(e,t,r){this.props=e,this.context=t,this.refs=U2,this.updater=r||G2}Ol.prototype.isReactComponent={};Ol.prototype.setState=function(e,t){if(typeof e!="object"&&typeof e!="function"&&e!=null)throw Error("takes an object of state variables to update or a function which returns an object of state variables.");this.updater.enqueueSetState(this,e,t,"setState")};Ol.prototype.forceUpdate=function(e){this.updater.enqueueForceUpdate(this,e,"forceUpdate")};function K2(){}K2.prototype=Ol.prototype;function Ch(e,t,r){this.props=e,this.context=t,this.refs=U2,this.updater=r||G2}var Nh=Ch.prototype=new K2;Nh.constructor=Ch;J2(Nh,Ol.prototype);Nh.isPureReactComponent=!0;var M2=Array.isArray;function jh(){}var Nt={H:null,A:null,T:null,S:null},Q2=Object.prototype.hasOwnProperty;function Wh(e,t,r){var n=r.ref;return{$$typeof:zh,type:e,key:t,ref:n!==void 0?n:null,props:r}}function $T(e,t){return Wh(e.type,t,e.props)}function Xh(e){return typeof e=="object"&&e!==null&&e.$$typeof===zh}function eP(e){var t={"=":"=0",":":"=2"};return"$"+e.replace(/[=:]/g,function(r){return t[r]})}var Y2=/\/+/g;function Dh(e,t){return typeof e=="object"&&e!==null&&e.key!=null?eP(""+e.key):t.toString(36)}function tP(e){switch(e.status){case"fulfilled":return e.value;case"rejected":throw e.reason;default:switch(typeof e.status=="string"?e.then(jh,jh):(e.status="pending",e.then(function(t){e.status==="pending"&&(e.status="fulfilled",e.value=t)},function(t){e.status==="pending"&&(e.status="rejected",e.reason=t)})),e.status){case"fulfilled":return e.value;case"rejected":throw e.reason}}throw e}function Hl(e,t,r,n,a){var i=typeof e;(i==="undefined"||i==="boolean")&&(e=null);var s=!1;if(e===null)s=!0;else switch(i){case"bigint":case"string":case"number":s=!0;break;case"object":switch(e.$$typeof){case zh:case BT:s=!0;break;case Z2:return s=e._init,Hl(s(e._payload),t,r,n,a)}}if(s)return a=a(e),s=n===""?"."+Dh(e,0):n,M2(a)?(r="",s!=null&&(r=s.replace(Y2,"$&/")+"/"),Hl(a,t,r,"",function(f){return f})):a!=null&&(Xh(a)&&(a=$T(a,r+(a.key==null||e&&e.key===a.key?"":(""+a.key).replace(Y2,"$&/")+"/")+s)),t.push(a)),1;s=0;var l=n===""?".":n+":";if(M2(e))for(var o=0;o<e.length;o++)n=e[o],i=l+Dh(n,o),s+=Hl(n,t,r,i,a);else if(o=_T(e),typeof o=="function")for(e=o.call(e),o=0;!(n=e.next()).done;)n=n.value,i=l+Dh(n,o++),s+=Hl(n,t,r,i,a);else if(i==="object"){if(typeof e.then=="function")return Hl(tP(e),t,r,n,a);throw t=String(e),Error("Objects are not valid as a React child (found: "+(t==="[object Object]"?"object with keys {"+Object.keys(e).join(", ")+"}":t)+"). If you meant to render a collection of children, use an array instead.")}return s}function cu(e,t,r){if(e==null)return e;var n=[],a=0;return Hl(e,n,"","",function(i){return t.call(r,i,a++)}),n}function rP(e){if(e._status===-1){var t=e._result;t=t(),t.then(function(r){(e._status===0||e._status===-1)&&(e._status=1,e._result=r)},function(r){(e._status===0||e._status===-1)&&(e._status=2,e._result=r)}),e._status===-1&&(e._status=0,e._result=t)}if(e._status===1)return e._result.default;throw e._result}var q2=typeof reportError=="function"?reportError:function(e){if(typeof window=="object"&&typeof window.ErrorEvent=="function"){var t=new window.ErrorEvent("error",{bubbles:!0,cancelable:!0,message:typeof e=="object"&&e!==null&&typeof e.message=="string"?String(e.message):String(e),error:e});if(!window.dispatchEvent(t))return}else if(typeof process=="object"&&typeof process.emit=="function"){process.emit("uncaughtException",e);return}console.error(e)},nP={map:cu,forEach:function(e,t,r){cu(e,function(){t.apply(this,arguments)},r)},count:function(e){var t=0;return cu(e,function(){t++}),t},toArray:function(e){return cu(e,function(t){return t})||[]},only:function(e){if(!Xh(e))throw Error("React.Children.only expected to receive a single React element child.");return e}};$e.Activity=QT;$e.Children=nP;$e.Component=Ol;$e.Fragment=MT;$e.Profiler=qT;$e.PureComponent=Ch;$e.StrictMode=YT;$e.Suspense=UT;$e.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE=Nt;$e.__COMPILER_RUNTIME={__proto__:null,c:function(e){return Nt.H.useMemoCache(e)}};$e.cache=function(e){return function(){return e.apply(null,arguments)}};$e.cacheSignal=function(){return null};$e.cloneElement=function(e,t,r){if(e==null)throw Error("The argument must be a React element, but you passed "+e+".");var n=J2({},e.props),a=e.key;if(t!=null)for(i in t.key!==void 0&&(a=""+t.key),t)!Q2.call(t,i)||i==="key"||i==="__self"||i==="__source"||i==="ref"&&t.ref===void 0||(n[i]=t[i]);var i=arguments.length-2;if(i===1)n.children=r;else if(1<i){for(var s=Array(i),l=0;l<i;l++)s[l]=arguments[l+2];n.children=s}return Wh(e.type,a,n)};$e.createContext=function(e){return e={$$typeof:GT,_currentValue:e,_currentValue2:e,_threadCount:0,Provider:null,Consumer:null},e.Provider=e,e.Consumer={$$typeof:ZT,_context:e},e};$e.createElement=function(e,t,r){var n,a={},i=null;if(t!=null)for(n in t.key!==void 0&&(i=""+t.key),t)Q2.call(t,n)&&n!=="key"&&n!=="__self"&&n!=="__source"&&(a[n]=t[n]);var s=arguments.length-2;if(s===1)a.children=r;else if(1<s){for(var l=Array(s),o=0;o<s;o++)l[o]=arguments[o+2];a.children=l}if(e&&e.defaultProps)for(n in s=e.defaultProps,s)a[n]===void 0&&(a[n]=s[n]);return Wh(e,i,a)};$e.createRef=function(){return{current:null}};$e.forwardRef=function(e){return{$$typeof:JT,render:e}};$e.isValidElement=Xh;$e.lazy=function(e){return{$$typeof:Z2,_payload:{_status:-1,_result:e},_init:rP}};$e.memo=function(e,t){return{$$typeof:KT,type:e,compare:t===void 0?null:t}};$e.startTransition=function(e){var t=Nt.T,r={};Nt.T=r;try{var n=e(),a=Nt.S;a!==null&&a(r,n),typeof n=="object"&&n!==null&&typeof n.then=="function"&&n.then(jh,q2)}catch(i){q2(i)}finally{t!==null&&r.types!==null&&(t.types=r.types),Nt.T=t}};$e.unstable_useCacheRefresh=function(){return Nt.H.useCacheRefresh()};$e.use=function(e){return Nt.H.use(e)};$e.useActionState=function(e,t,r){return Nt.H.useActionState(e,t,r)};$e.useCallback=function(e,t){return Nt.H.useCallback(e,t)};$e.useContext=function(e){return Nt.H.useContext(e)};$e.useDebugValue=function(){};$e.useDeferredValue=function(e,t){return Nt.H.useDeferredValue(e,t)};$e.useEffect=function(e,t){return Nt.H.useEffect(e,t)};$e.useEffectEvent=function(e){return Nt.H.useEffectEvent(e)};$e.useId=function(){return Nt.H.useId()};$e.useImperativeHandle=function(e,t,r){return Nt.H.useImperativeHandle(e,t,r)};$e.useInsertionEffect=function(e,t){return Nt.H.useInsertionEffect(e,t)};$e.useLayoutEffect=function(e,t){return Nt.H.useLayoutEffect(e,t)};$e.useMemo=function(e,t){return Nt.H.useMemo(e,t)};$e.useOptimistic=function(e,t){return Nt.H.useOptimistic(e,t)};$e.useReducer=function(e,t,r){return Nt.H.useReducer(e,t,r)};$e.useRef=function(e){return Nt.H.useRef(e)};$e.useState=function(e){return Nt.H.useState(e)};$e.useSyncExternalStore=function(e,t,r){return Nt.H.useSyncExternalStore(e,t,r)};$e.useTransition=function(){return Nt.H.useTransition()};$e.version="19.2.5"});var Dl=ca((wY,$2)=>{"use strict";$2.exports=_2()});var fy=ca(Mt=>{"use strict";function Vh(e,t){var r=e.length;e.push(t);e:for(;0<r;){var n=r-1>>>1,a=e[n];if(0<uu(a,t))e[n]=t,e[r]=a,r=n;else break e}}function Ea(e){return e.length===0?null:e[0]}function hu(e){if(e.length===0)return null;var t=e[0],r=e.pop();if(r!==t){e[0]=r;e:for(var n=0,a=e.length,i=a>>>1;n<i;){var s=2*(n+1)-1,l=e[s],o=s+1,f=e[o];if(0>uu(l,r))o<a&&0>uu(f,l)?(e[n]=f,e[o]=r,n=o):(e[n]=l,e[s]=r,n=s);else if(o<a&&0>uu(f,r))e[n]=f,e[o]=r,n=o;else break e}}return t}function uu(e,t){var r=e.sortIndex-t.sortIndex;return r!==0?r:e.id-t.id}Mt.unstable_now=void 0;typeof performance=="object"&&typeof performance.now=="function"?(ey=performance,Mt.unstable_now=function(){return ey.now()}):(Ih=Date,ty=Ih.now(),Mt.unstable_now=function(){return Ih.now()-ty});var ey,Ih,ty,_a=[],Fi=[],aP=1,Fn=null,Vr=3,Bh=!1,af=!1,sf=!1,Mh=!1,ay=typeof setTimeout=="function"?setTimeout:null,iy=typeof clearTimeout=="function"?clearTimeout:null,ry=typeof setImmediate<"u"?setImmediate:null;function du(e){for(var t=Ea(Fi);t!==null;){if(t.callback===null)hu(Fi);else if(t.startTime<=e)hu(Fi),t.sortIndex=t.expirationTime,Vh(_a,t);else break;t=Ea(Fi)}}function Yh(e){if(sf=!1,du(e),!af)if(Ea(_a)!==null)af=!0,zl||(zl=!0,jl());else{var t=Ea(Fi);t!==null&&qh(Yh,t.startTime-e)}}var zl=!1,lf=-1,sy=5,ly=-1;function oy(){return Mh?!0:!(Mt.unstable_now()-ly<sy)}function Rh(){if(Mh=!1,zl){var e=Mt.unstable_now();ly=e;var t=!0;try{e:{af=!1,sf&&(sf=!1,iy(lf),lf=-1),Bh=!0;var r=Vr;try{t:{for(du(e),Fn=Ea(_a);Fn!==null&&!(Fn.expirationTime>e&&oy());){var n=Fn.callback;if(typeof n=="function"){Fn.callback=null,Vr=Fn.priorityLevel;var a=n(Fn.expirationTime<=e);if(e=Mt.unstable_now(),typeof a=="function"){Fn.callback=a,du(e),t=!0;break t}Fn===Ea(_a)&&hu(_a),du(e)}else hu(_a);Fn=Ea(_a)}if(Fn!==null)t=!0;else{var i=Ea(Fi);i!==null&&qh(Yh,i.startTime-e),t=!1}}break e}finally{Fn=null,Vr=r,Bh=!1}t=void 0}}finally{t?jl():zl=!1}}}var jl;typeof ry=="function"?jl=function(){ry(Rh)}:typeof MessageChannel<"u"?(Fh=new MessageChannel,ny=Fh.port2,Fh.port1.onmessage=Rh,jl=function(){ny.postMessage(null)}):jl=function(){ay(Rh,0)};var Fh,ny;function qh(e,t){lf=ay(function(){e(Mt.unstable_now())},t)}Mt.unstable_IdlePriority=5;Mt.unstable_ImmediatePriority=1;Mt.unstable_LowPriority=4;Mt.unstable_NormalPriority=3;Mt.unstable_Profiling=null;Mt.unstable_UserBlockingPriority=2;Mt.unstable_cancelCallback=function(e){e.callback=null};Mt.unstable_forceFrameRate=function(e){0>e||125<e?console.error("forceFrameRate takes a positive int between 0 and 125, forcing frame rates higher than 125 fps is not supported"):sy=0<e?Math.floor(1e3/e):5};Mt.unstable_getCurrentPriorityLevel=function(){return Vr};Mt.unstable_next=function(e){switch(Vr){case 1:case 2:case 3:var t=3;break;default:t=Vr}var r=Vr;Vr=t;try{return e()}finally{Vr=r}};Mt.unstable_requestPaint=function(){Mh=!0};Mt.unstable_runWithPriority=function(e,t){switch(e){case 1:case 2:case 3:case 4:case 5:break;default:e=3}var r=Vr;Vr=e;try{return t()}finally{Vr=r}};Mt.unstable_scheduleCallback=function(e,t,r){var n=Mt.unstable_now();switch(typeof r=="object"&&r!==null?(r=r.delay,r=typeof r=="number"&&0<r?n+r:n):r=n,e){case 1:var a=-1;break;case 2:a=250;break;case 5:a=1073741823;break;case 4:a=1e4;break;default:a=5e3}return a=r+a,e={id:aP++,callback:t,priorityLevel:e,startTime:r,expirationTime:a,sortIndex:-1},r>n?(e.sortIndex=r,Vh(Fi,e),Ea(_a)===null&&e===Ea(Fi)&&(sf?(iy(lf),lf=-1):sf=!0,qh(Yh,r-n))):(e.sortIndex=a,Vh(_a,e),af||Bh||(af=!0,zl||(zl=!0,jl()))),e};Mt.unstable_shouldYield=oy;Mt.unstable_wrapCallback=function(e){var t=Vr;return function(){var r=Vr;Vr=t;try{return e.apply(this,arguments)}finally{Vr=r}}}});var uy=ca((EY,cy)=>{"use strict";cy.exports=fy()});var hy=ca($r=>{"use strict";var iP=Dl();function dy(e){var t="https://react.dev/errors/"+e;if(1<arguments.length){t+="?args[]="+encodeURIComponent(arguments[1]);for(var r=2;r<arguments.length;r++)t+="&args[]="+encodeURIComponent(arguments[r])}return"Minified React error #"+e+"; visit "+t+" for the full message or use the non-minified dev environment for full errors and additional helpful warnings."}function Vi(){}var _r={d:{f:Vi,r:function(){throw Error(dy(522))},D:Vi,C:Vi,L:Vi,m:Vi,X:Vi,S:Vi,M:Vi},p:0,findDOMNode:null},sP=Symbol.for("react.portal");function lP(e,t,r){var n=3<arguments.length&&arguments[3]!==void 0?arguments[3]:null;return{$$typeof:sP,key:n==null?null:""+n,children:e,containerInfo:t,implementation:r}}var of=iP.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;function Au(e,t){if(e==="font")return"";if(typeof t=="string")return t==="use-credentials"?t:""}$r.__DOM_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE=_r;$r.createPortal=function(e,t){var r=2<arguments.length&&arguments[2]!==void 0?arguments[2]:null;if(!t||t.nodeType!==1&&t.nodeType!==9&&t.nodeType!==11)throw Error(dy(299));return lP(e,t,null,r)};$r.flushSync=function(e){var t=of.T,r=_r.p;try{if(of.T=null,_r.p=2,e)return e()}finally{of.T=t,_r.p=r,_r.d.f()}};$r.preconnect=function(e,t){typeof e=="string"&&(t?(t=t.crossOrigin,t=typeof t=="string"?t==="use-credentials"?t:"":void 0):t=null,_r.d.C(e,t))};$r.prefetchDNS=function(e){typeof e=="string"&&_r.d.D(e)};$r.preinit=function(e,t){if(typeof e=="string"&&t&&typeof t.as=="string"){var r=t.as,n=Au(r,t.crossOrigin),a=typeof t.integrity=="string"?t.integrity:void 0,i=typeof t.fetchPriority=="string"?t.fetchPriority:void 0;r==="style"?_r.d.S(e,typeof t.precedence=="string"?t.precedence:void 0,{crossOrigin:n,integrity:a,fetchPriority:i}):r==="script"&&_r.d.X(e,{crossOrigin:n,integrity:a,fetchPriority:i,nonce:typeof t.nonce=="string"?t.nonce:void 0})}};$r.preinitModule=function(e,t){if(typeof e=="string")if(typeof t=="object"&&t!==null){if(t.as==null||t.as==="script"){var r=Au(t.as,t.crossOrigin);_r.d.M(e,{crossOrigin:r,integrity:typeof t.integrity=="string"?t.integrity:void 0,nonce:typeof t.nonce=="string"?t.nonce:void 0})}}else t==null&&_r.d.M(e)};$r.preload=function(e,t){if(typeof e=="string"&&typeof t=="object"&&t!==null&&typeof t.as=="string"){var r=t.as,n=Au(r,t.crossOrigin);_r.d.L(e,r,{crossOrigin:n,integrity:typeof t.integrity=="string"?t.integrity:void 0,nonce:typeof t.nonce=="string"?t.nonce:void 0,type:typeof t.type=="string"?t.type:void 0,fetchPriority:typeof t.fetchPriority=="string"?t.fetchPriority:void 0,referrerPolicy:typeof t.referrerPolicy=="string"?t.referrerPolicy:void 0,imageSrcSet:typeof t.imageSrcSet=="string"?t.imageSrcSet:void 0,imageSizes:typeof t.imageSizes=="string"?t.imageSizes:void 0,media:typeof t.media=="string"?t.media:void 0})}};$r.preloadModule=function(e,t){if(typeof e=="string")if(t){var r=Au(t.as,t.crossOrigin);_r.d.m(e,{as:typeof t.as=="string"&&t.as!=="script"?t.as:void 0,crossOrigin:r,integrity:typeof t.integrity=="string"?t.integrity:void 0})}else _r.d.m(e)};$r.requestFormReset=function(e){_r.d.r(e)};$r.unstable_batchedUpdates=function(e,t){return e(t)};$r.useFormState=function(e,t,r){return of.H.useFormState(e,t,r)};$r.useFormStatus=function(){return of.H.useHostTransitionStatus()};$r.version="19.2.5"});var Zh=ca((PY,vy)=>{"use strict";function Ay(){if(!(typeof __REACT_DEVTOOLS_GLOBAL_HOOK__>"u"||typeof __REACT_DEVTOOLS_GLOBAL_HOOK__.checkDCE!="function"))try{__REACT_DEVTOOLS_GLOBAL_HOOK__.checkDCE(Ay)}catch(e){console.error(e)}}Ay(),vy.exports=hy()});var kw=ca(R0=>{"use strict";var br=uy(),Vg=Dl(),oP=Zh();function ke(e){var t="https://react.dev/errors/"+e;if(1<arguments.length){t+="?args[]="+encodeURIComponent(arguments[1]);for(var r=2;r<arguments.length;r++)t+="&args[]="+encodeURIComponent(arguments[r])}return"Minified React error #"+e+"; visit "+t+" for the full message or use the non-minified dev environment for full errors and additional helpful warnings."}function Bg(e){return!(!e||e.nodeType!==1&&e.nodeType!==9&&e.nodeType!==11)}function Jf(e){var t=e,r=e;if(e.alternate)for(;t.return;)t=t.return;else{e=t;do t=e,(t.flags&4098)!==0&&(r=t.return),e=t.return;while(e)}return t.tag===3?r:null}function Mg(e){if(e.tag===13){var t=e.memoizedState;if(t===null&&(e=e.alternate,e!==null&&(t=e.memoizedState)),t!==null)return t.dehydrated}return null}function Yg(e){if(e.tag===31){var t=e.memoizedState;if(t===null&&(e=e.alternate,e!==null&&(t=e.memoizedState)),t!==null)return t.dehydrated}return null}function py(e){if(Jf(e)!==e)throw Error(ke(188))}function fP(e){var t=e.alternate;if(!t){if(t=Jf(e),t===null)throw Error(ke(188));return t!==e?null:e}for(var r=e,n=t;;){var a=r.return;if(a===null)break;var i=a.alternate;if(i===null){if(n=a.return,n!==null){r=n;continue}break}if(a.child===i.child){for(i=a.child;i;){if(i===r)return py(a),e;if(i===n)return py(a),t;i=i.sibling}throw Error(ke(188))}if(r.return!==n.return)r=a,n=i;else{for(var s=!1,l=a.child;l;){if(l===r){s=!0,r=a,n=i;break}if(l===n){s=!0,n=a,r=i;break}l=l.sibling}if(!s){for(l=i.child;l;){if(l===r){s=!0,r=i,n=a;break}if(l===n){s=!0,n=i,r=a;break}l=l.sibling}if(!s)throw Error(ke(189))}}if(r.alternate!==n)throw Error(ke(190))}if(r.tag!==3)throw Error(ke(188));return r.stateNode.current===r?e:t}function qg(e){var t=e.tag;if(t===5||t===26||t===27||t===6)return e;for(e=e.child;e!==null;){if(t=qg(e),t!==null)return t;e=e.sibling}return null}var It=Object.assign,cP=Symbol.for("react.element"),vu=Symbol.for("react.transitional.element"),pf=Symbol.for("react.portal"),Rl=Symbol.for("react.fragment"),Zg=Symbol.for("react.strict_mode"),PA=Symbol.for("react.profiler"),Gg=Symbol.for("react.consumer"),si=Symbol.for("react.context"),gv=Symbol.for("react.forward_ref"),kA=Symbol.for("react.suspense"),LA=Symbol.for("react.suspense_list"),wv=Symbol.for("react.memo"),Bi=Symbol.for("react.lazy"),HA=Symbol.for("react.activity"),uP=Symbol.for("react.memo_cache_sentinel"),my=Symbol.iterator;function ff(e){return e===null||typeof e!="object"?null:(e=my&&e[my]||e["@@iterator"],typeof e=="function"?e:null)}var dP=Symbol.for("react.client.reference");function OA(e){if(e==null)return null;if(typeof e=="function")return e.$$typeof===dP?null:e.displayName||e.name||null;if(typeof e=="string")return e;switch(e){case Rl:return"Fragment";case PA:return"Profiler";case Zg:return"StrictMode";case kA:return"Suspense";case LA:return"SuspenseList";case HA:return"Activity"}if(typeof e=="object")switch(e.$$typeof){case pf:return"Portal";case si:return e.displayName||"Context";case Gg:return(e._context.displayName||"Context")+".Consumer";case gv:var t=e.render;return e=e.displayName,e||(e=t.displayName||t.name||"",e=e!==""?"ForwardRef("+e+")":"ForwardRef"),e;case wv:return t=e.displayName||null,t!==null?t:OA(e.type)||"Memo";case Bi:t=e._payload,e=e._init;try{return OA(e(t))}catch{}}return null}var mf=Array.isArray,Ue=Vg.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE,xt=oP.__DOM_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE,Is={pending:!1,data:null,method:null,action:null},DA=[],Fl=-1;function Ha(e){return{current:e}}function Tr(e){0>Fl||(e.current=DA[Fl],DA[Fl]=null,Fl--)}function jt(e,t){Fl++,DA[Fl]=e.current,e.current=t}var La=Ha(null),Cf=Ha(null),$i=Ha(null),Ju=Ha(null);function Uu(e,t){switch(jt($i,t),jt(Cf,e),jt(La,null),t.nodeType){case 9:case 11:e=(e=t.documentElement)&&(e=e.namespaceURI)?Eg(e):0;break;default:if(e=t.tagName,t=t.namespaceURI)t=Eg(t),e=hw(t,e);else switch(e){case"svg":e=1;break;case"math":e=2;break;default:e=0}}Tr(La),jt(La,e)}function ao(){Tr(La),Tr(Cf),Tr($i)}function jA(e){e.memoizedState!==null&&jt(Ju,e);var t=La.current,r=hw(t,e.type);t!==r&&(jt(Cf,e),jt(La,r))}function Ku(e){Cf.current===e&&(Tr(La),Tr(Cf)),Ju.current===e&&(Tr(Ju),qf._currentValue=Is)}var Gh,by;function Cs(e){if(Gh===void 0)try{throw Error()}catch(r){var t=r.stack.trim().match(/\n( *(at )?)/);Gh=t&&t[1]||"",by=-1<r.stack.indexOf(`
     at`)?" (<anonymous>)":-1<r.stack.indexOf("@")?"@unknown:0:0":""}return`
@@ -1431,7 +1821,7 @@ Wrap a line in **double stars** for a bold centered heading, or __double undersc
   @media (max-width: 860px) {
     .field-row-2 { grid-template-columns: 1fr !important; }
   }
-`;var NT=Rn(Tl()),xY=(0,CT.createRoot)(document.getElementById("root"));xY.render((0,NT.jsx)(R2,{}));})();
+`;var NT=Rn(Tl()),xY=(0,CT.createRoot)(document.getElementById("root"));(window.__waitForAuth?window.__waitForAuth():Promise.resolve()).then(function(){xY.render((0,NT.jsx)(R2,{}))});})();
 /*! Bundled license information:
 
 react/cjs/react.production.js:
