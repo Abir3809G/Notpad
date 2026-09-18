@@ -113,6 +113,38 @@ function esc(s){
   });
 }
 
+function errBox(msg){ return '<div style="background:#FEE2E2;color:#B91C1C;padding:9px 12px;border-radius:8px;margin-bottom:14px;font-size:13px;">'+esc(msg)+'</div>'; }
+function okBox(msg){ return '<div style="background:#DCFCE7;color:#166534;padding:8px 12px;border-radius:8px;margin-bottom:12px;font-size:13px;">'+esc(msg)+'</div>'; }
+
+function wirePasswordToggles(container){
+  var toggles = container.querySelectorAll('[data-toggle-pass]');
+  for(var i=0;i<toggles.length;i++){
+    (function(btn){
+      btn.onclick = function(){
+        var input = document.getElementById(btn.getAttribute('data-toggle-pass'));
+        if(!input) return;
+        if(input.type === 'password'){ input.type = 'text'; btn.textContent = 'Hide'; }
+        else { input.type = 'password'; btn.textContent = 'Show'; }
+      };
+    })(toggles[i]);
+  }
+}
+
+function passwordFieldHtml(id, autocomplete){
+  return '<div style="position:relative;">'+
+    '<input id="'+id+'" type="password" autocomplete="'+(autocomplete||'')+'" style="width:100%;box-sizing:border-box;padding:10px 46px 10px 12px;border:1px solid #d5d8de;border-radius:8px;font-size:14px;" />'+
+    '<button type="button" data-toggle-pass="'+id+'" style="position:absolute;right:6px;top:50%;transform:translateY(-50%);border:none;background:none;cursor:pointer;font-size:12px;color:#666;padding:4px 6px;">Show</button>'+
+  '</div>';
+}
+
+function updateOwnPassword(token, newPassword){
+  return apiJson(AUTH_URL+"/user", {
+    method:"PUT",
+    headers:{Authorization:"Bearer "+token,"Content-Type":"application/json"},
+    body: JSON.stringify({password:newPassword})
+  });
+}
+
 var overlay = document.getElementById("auth-overlay");
 var rootEl = document.getElementById("root");
 if(rootEl) rootEl.style.visibility = "hidden";
@@ -137,9 +169,10 @@ function showLogin(err){
     '<label style="display:block;font-size:13px;color:#444;margin-bottom:4px;">Email</label>'+
     '<input id="li-email" type="email" autocomplete="username" style="width:100%;box-sizing:border-box;padding:10px 12px;margin:0 0 14px;border:1px solid #d5d8de;border-radius:8px;font-size:14px;" />'+
     '<label style="display:block;font-size:13px;color:#444;margin-bottom:4px;">Password</label>'+
-    '<input id="li-pass" type="password" autocomplete="current-password" style="width:100%;box-sizing:border-box;padding:10px 12px;margin:0 0 20px;border:1px solid #d5d8de;border-radius:8px;font-size:14px;" />'+
+    '<div style="margin:0 0 20px;">'+passwordFieldHtml("li-pass","current-password")+'</div>'+
     '<button id="li-submit" style="width:100%;padding:12px;background:#1C2333;color:#fff;border:none;border-radius:8px;font-weight:600;font-size:14px;cursor:pointer;">Sign in</button>'
   ));
+  wirePasswordToggles(overlay);
   var pass = document.getElementById("li-pass");
   document.getElementById("li-submit").onclick = doLogin;
   pass.addEventListener("keydown", function(e){ if(e.key==="Enter") doLogin(); });
@@ -194,6 +227,7 @@ function injectChrome(){
   bar.id = "app-chrome-bar";
   bar.style.cssText = "position:fixed;top:10px;right:14px;z-index:99998;display:flex;gap:8px;font-family:system-ui,sans-serif;";
   var html = '<button id="app-logout-btn" style="padding:6px 14px;background:#fff;border:1px solid #d5d8de;border-radius:20px;font-size:12px;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,.08);">Logout</button>';
+  html = '<button id="app-changepw-btn" style="padding:6px 14px;background:#fff;border:1px solid #d5d8de;border-radius:20px;font-size:12px;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,.08);">Change Password</button>' + html;
   if(window.__isAdmin){
     html = '<button id="app-admin-btn" style="padding:6px 14px;background:#1C2333;color:#fff;border:none;border-radius:20px;font-size:12px;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,.15);">Admin Panel</button>' + html;
   }
@@ -203,9 +237,51 @@ function injectChrome(){
     clearSession();
     location.reload();
   };
+  document.getElementById("app-changepw-btn").onclick = openChangePassword;
   if(window.__isAdmin){
     document.getElementById("app-admin-btn").onclick = openAdminPanel;
   }
+}
+
+function openChangePassword(){
+  overlay.style.display = "flex";
+  if(rootEl) rootEl.style.visibility = "hidden";
+  render(card(
+    '<h2 style="margin:0 0 4px;font-family:Georgia,\'Times New Roman\',serif;font-size:20px;color:#1C2333;">Change Password</h2>'+
+    '<p style="margin:0 0 18px;color:#777;font-size:13px;">'+esc(state.authUser.email)+'</p>'+
+    '<div id="cp-msg"></div>'+
+    '<label style="display:block;font-size:13px;color:#444;margin-bottom:4px;">New Password</label>'+
+    '<div style="margin:0 0 14px;">'+passwordFieldHtml("cp-new","new-password")+'</div>'+
+    '<label style="display:block;font-size:13px;color:#444;margin-bottom:4px;">Confirm Password</label>'+
+    '<div style="margin:0 0 20px;">'+passwordFieldHtml("cp-confirm","new-password")+'</div>'+
+    '<div style="display:flex;gap:10px;">'+
+      '<button id="cp-cancel" style="flex:1;padding:11px;background:#fff;border:1px solid #d5d8de;color:#333;border-radius:8px;cursor:pointer;">Cancel</button>'+
+      '<button id="cp-save" style="flex:1;padding:11px;background:#1C2333;color:#fff;border:none;border-radius:8px;font-weight:600;cursor:pointer;">Save</button>'+
+    '</div>'
+  ));
+  wirePasswordToggles(overlay);
+  document.getElementById("cp-cancel").onclick = function(){
+    overlay.style.display = "none";
+    if(rootEl) rootEl.style.visibility = "visible";
+  };
+  document.getElementById("cp-save").onclick = function(){
+    var p1 = document.getElementById("cp-new").value;
+    var p2 = document.getElementById("cp-confirm").value;
+    var msg = document.getElementById("cp-msg");
+    if(!p1 || p1.length < 6){ msg.innerHTML = errBox("Password কমপক্ষে ৬ ক্যারেক্টার দিন"); return; }
+    if(p1 !== p2){ msg.innerHTML = errBox("দুটো Password মিলছে না"); return; }
+    var btn = document.getElementById("cp-save");
+    btn.disabled = true; btn.textContent = "Saving...";
+    updateOwnPassword(state.token, p1).then(function(){
+      msg.innerHTML = okBox("Password পরিবর্তন হয়ে গেছে।");
+      btn.disabled = false; btn.textContent = "Save";
+      document.getElementById("cp-new").value = "";
+      document.getElementById("cp-confirm").value = "";
+    }).catch(function(e){
+      btn.disabled = false; btn.textContent = "Save";
+      msg.innerHTML = errBox(e.message);
+    });
+  };
 }
 
 /* ---------- Admin Panel ---------- */
