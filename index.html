@@ -232,8 +232,8 @@ function doLogin(){
 
 function enterApp(){
   window.__appUser = state.appUser;
-  window.__isAdmin = !state.appUser || state.appUser.role === "admin";
-  window.__appPerms = (state.appUser && state.appUser.permissions) || {};
+  window.__isAdmin = !!(state.appUser && state.appUser.role === "admin");
+  window.__appPerms = state.appUser ? state.appUser.permissions : {};
   window.__appAuthToken = state.token;
   window.__appAuthedFetch = function(url, opts){
     opts = opts || {};
